@@ -1,28 +1,5 @@
-// Copyright (C) 2020, Cloudflare, Inc.
-// All rights reserved.
-//
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright notice,
-//       this list of conditions and the following disclaimer.
-//
-//     * Redistributions in binary form must reproduce the above copyright
-//       notice, this list of conditions and the following disclaimer in the
-//       documentation and/or other materials provided with the distribution.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
-// IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
-// THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-// PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
-// CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-// EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-// PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-// PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-// LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+const MAX_BUF_SIZE: usize = 65507;
+const MAX_DATAGRAM_SIZE: usize = 1350;
 
 use log::{debug, error, info, trace, warn};
 use ring::rand::*;
@@ -34,8 +11,7 @@ use std::io::prelude::*;
 use std::net;
 use std::rc::Rc;
 use std::time::Duration;
-const MAX_BUF_SIZE: usize = 65507;
-const MAX_DATAGRAM_SIZE: usize = 1350;
+
 use quiche::ConnectionId;
 use quiche::h3::NameValue;
 use quiche::h3::Priority;
@@ -61,6 +37,12 @@ use partial_request::PartialRequest;
 mod partial_response;
 use partial_response::PartialResponse;
 
+mod make_resource_writer;
+use make_resource_writer::make_resource_writer;
+
+mod client;
+use client::{Client, ClientIdMap, ClientMap};
+
 fn main() {
     let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
     let mut out: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
@@ -71,7 +53,6 @@ fn main() {
     // Parse CLI parameters.
     let docopt: docopt::Docopt = docopt::Docopt::new(SERVER_USAGE).unwrap();
     let conn_args: CommonArgs = CommonArgs::with_docopt(&docopt);
-    let args: ServerArgs = ServerArgs::with_docopt(&docopt);
 
     // Setup the event loop.
     let mut poll: mio::Poll = mio::Poll::new().unwrap();
@@ -79,7 +60,7 @@ fn main() {
 
     // Create the UDP listening socket, and register it with the event loop.
     let mut socket: mio::net::UdpSocket =
-        mio::net::UdpSocket::bind(args.listen.parse().unwrap()).unwrap();
+        mio::net::UdpSocket::bind("127.0.0.1:4433".parse().unwrap()).unwrap();
 
     info!("listening on {:}", socket.local_addr().unwrap());
 
@@ -93,12 +74,14 @@ fn main() {
     // Create the configuration for the QUIC connections.
     let mut config: quiche::Config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 
-    config.load_cert_chain_from_pem_file(&args.cert).unwrap();
-    config.load_priv_key_from_pem_file(&args.key).unwrap();
+    config
+        .load_cert_chain_from_pem_file("cert/cert.crt")
+        .unwrap();
+    config.load_priv_key_from_pem_file("cert/cert.key").unwrap();
 
     config.set_application_protos(&conn_args.alpns).unwrap();
 
-    config.discover_pmtu(args.enable_pmtud);
+    config.discover_pmtu(false);
     config.set_initial_rtt(conn_args.initial_rtt);
     config.set_max_idle_timeout(conn_args.idle_timeout);
     config.set_max_recv_udp_payload_size(max_datagram_size);
@@ -267,60 +250,56 @@ fn main() {
                 let mut scid = [0; quiche::MAX_CONN_ID_LEN];
                 scid.copy_from_slice(&conn_id);
 
-                let mut odcid = None;
+                // Token is always present in Initial packets.
+                let token = hdr.token.as_ref().unwrap();
 
-                if !args.no_retry {
-                    // Token is always present in Initial packets.
-                    let token = hdr.token.as_ref().unwrap();
+                // Do stateless retry if the client didn't send a token.
+                if token.is_empty() {
+                    warn!("Doing stateless retry");
 
-                    // Do stateless retry if the client didn't send a token.
-                    if token.is_empty() {
-                        warn!("Doing stateless retry");
+                    let scid = quiche::ConnectionId::from_ref(&scid);
+                    let new_token = mint_token(&hdr, &from);
 
-                        let scid = quiche::ConnectionId::from_ref(&scid);
-                        let new_token = mint_token(&hdr, &from);
+                    let len = quiche::retry(
+                        &hdr.scid,
+                        &hdr.dcid,
+                        &scid,
+                        &new_token,
+                        hdr.version,
+                        &mut out,
+                    )
+                    .unwrap();
 
-                        let len = quiche::retry(
-                            &hdr.scid,
-                            &hdr.dcid,
-                            &scid,
-                            &new_token,
-                            hdr.version,
-                            &mut out,
-                        )
-                        .unwrap();
+                    let out = &out[..len];
 
-                        let out = &out[..len];
-
-                        if let Err(e) = socket.send_to(out, from) {
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                trace!("send() would block");
-                                break;
-                            }
-
-                            panic!("send() failed: {e:?}");
+                    if let Err(e) = socket.send_to(out, from) {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                            trace!("send() would block");
+                            break;
                         }
-                        continue 'read;
+
+                        panic!("send() failed: {e:?}");
                     }
-
-                    odcid = validate_token(&from, token);
-
-                    // The token was not valid, meaning the retry failed, so
-                    // drop the packet.
-                    if odcid.is_none() {
-                        error!("Invalid address validation token");
-                        continue;
-                    }
-
-                    if scid.len() != hdr.dcid.len() {
-                        error!("Invalid destination connection ID");
-                        continue 'read;
-                    }
-
-                    // Reuse the source connection ID we sent in the Retry
-                    // packet, instead of changing it again.
-                    scid.copy_from_slice(&hdr.dcid);
+                    continue 'read;
                 }
+
+                let odcid = validate_token(&from, token);
+
+                // The token was not valid, meaning the retry failed, so
+                // drop the packet.
+                if odcid.is_none() {
+                    error!("Invalid address validation token");
+                    continue;
+                }
+
+                if scid.len() != hdr.dcid.len() {
+                    error!("Invalid destination connection ID");
+                    continue 'read;
+                }
+
+                // Reuse the source connection ID we sent in the Retry
+                // packet, instead of changing it again.
+                scid.copy_from_slice(&hdr.dcid);
 
                 let scid = quiche::ConnectionId::from_vec(scid.to_vec());
 
@@ -453,8 +432,8 @@ fn main() {
                         conn,
                         &mut client.partial_requests,
                         partial_responses,
-                        &args.root,
-                        &args.index,
+                        "webroot/",
+                        "index.html",
                         &mut buf,
                     )
                     .is_err()
@@ -914,47 +893,6 @@ Options:
   -h --help                   Show this screen.
 ";
 
-// Application-specific arguments that compliment the `CommonArgs`.
-pub struct ServerArgs {
-    pub listen: String,
-    pub no_retry: bool,
-    pub root: String,
-    pub index: String,
-    pub cert: String,
-    pub key: String,
-    pub disable_gso: bool,
-    pub disable_pacing: bool,
-    pub enable_pmtud: bool,
-}
-
-impl ServerArgs {
-    fn with_docopt(docopt: &docopt::Docopt) -> Self {
-        let args = docopt.parse().unwrap_or_else(|e| e.exit());
-
-        let listen = args.get_str("--listen").to_string();
-        let no_retry = args.get_bool("--no-retry");
-        let root = args.get_str("--root").to_string();
-        let index = args.get_str("--index").to_string();
-        let cert = args.get_str("--cert").to_string();
-        let key = args.get_str("--key").to_string();
-        let disable_gso = args.get_bool("--disable-gso");
-        let disable_pacing = args.get_bool("--disable-pacing");
-        let enable_pmtud = args.get_bool("--enable-pmtud");
-
-        ServerArgs {
-            listen,
-            no_retry,
-            root,
-            index,
-            cert,
-            key,
-            disable_gso,
-            disable_pacing,
-            enable_pmtud,
-        }
-    }
-}
-
 const H3_MESSAGE_ERROR: u64 = 0x10E;
 
 /// ALPN helpers.
@@ -963,61 +901,6 @@ const H3_MESSAGE_ERROR: u64 = 0x10E;
 pub mod alpns {
     pub const HTTP_09: [&[u8]; 2] = [b"hq-interop", b"http/0.9"];
     pub const HTTP_3: [&[u8]; 1] = [b"h3"];
-}
-
-pub type ClientId = u64;
-
-pub struct Client {
-    pub conn: quiche::Connection,
-
-    pub http_conn: Option<Box<dyn HttpConn>>,
-
-    pub client_id: u64,
-
-    pub app_proto_selected: bool,
-
-    pub partial_requests: std::collections::HashMap<u64, PartialRequest>,
-
-    pub partial_responses: std::collections::HashMap<u64, PartialResponse>,
-
-    pub max_datagram_size: usize,
-
-    pub loss_rate: f64,
-
-    pub max_send_burst: usize,
-}
-
-pub type ClientIdMap = HashMap<ConnectionId<'static>, ClientId>;
-pub type ClientMap = HashMap<ClientId, Client>;
-
-/// Makes a buffered writer for a resource with a target URL.
-///
-/// The file will have the same name as the resource's last path segment value.
-/// Multiple requests for the same URL are indicated by the value of `cardinal`,
-/// any value "N" greater than 1, will cause ".N" to be appended to the
-/// filename.
-fn make_resource_writer(
-    url: &url::Url,
-    target_path: &Option<String>,
-    cardinal: u64,
-) -> Option<std::io::BufWriter<std::fs::File>> {
-    if let Some(tp) = target_path {
-        let resource = url.path_segments().map(|c| c.collect::<Vec<_>>()).unwrap();
-
-        let mut path = format!("{}/{}", tp, resource.iter().last().unwrap());
-
-        if cardinal > 1 {
-            path = format!("{path}.{cardinal}");
-        }
-
-        match std::fs::File::create(&path) {
-            Ok(f) => return Some(std::io::BufWriter::new(f)),
-
-            Err(e) => panic!("Error creating file for {url}, attempted path was {path}: {e}"),
-        }
-    }
-
-    None
 }
 
 fn autoindex(path: path::PathBuf, index: &str) -> path::PathBuf {
@@ -1029,23 +912,6 @@ fn autoindex(path: path::PathBuf, index: &str) -> path::PathBuf {
     }
 
     path
-}
-
-/// Makes a buffered writer for a qlog.
-pub fn make_qlog_writer(
-    dir: &std::ffi::OsStr,
-    role: &str,
-    id: &str,
-) -> std::io::BufWriter<std::fs::File> {
-    let mut path = std::path::PathBuf::from(dir);
-    let filename = format!("{role}-{id}.sqlog");
-    path.push(filename);
-
-    match std::fs::File::create(&path) {
-        Ok(f) => std::io::BufWriter::new(f),
-
-        Err(e) => panic!("Error creating qlog file attempted path was {path:?}: {e}"),
-    }
 }
 
 fn dump_json(reqs: &[Http3Request], output_sink: &mut dyn FnMut(String)) {
@@ -2417,12 +2283,6 @@ impl HttpConn for Http3Conn {
             partial_responses.remove(&stream_id);
         }
     }
-}
-
-/// For non-Linux, there is no GSO support.
-#[cfg(not(target_os = "linux"))]
-pub fn detect_gso(_socket: &mio::net::UdpSocket, _segment_size: usize) -> bool {
-    false
 }
 
 /// For non-Linux platforms.
