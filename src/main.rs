@@ -25,29 +25,41 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use log::{debug, error, info, trace, warn};
-use std::io;
-use std::net;
-use std::io::prelude::*;
+use ring::rand::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::io;
+use std::io::prelude::*;
+use std::net;
 use std::rc::Rc;
-use std::cell::RefCell;
-use ring::rand::*;
 use std::time::Duration;
 const MAX_BUF_SIZE: usize = 65507;
 const MAX_DATAGRAM_SIZE: usize = 1350;
 use quiche::ConnectionId;
-use std::cmp;
-use std::path;
-use std::fmt::Write as _;
 use quiche::h3::NameValue;
 use quiche::h3::Priority;
+use std::cmp;
+use std::fmt::Write as _;
+use std::path;
 
 mod mint_token;
 use mint_token::mint_token;
 
 mod validate_token;
 use validate_token::validate_token;
+
+mod stdout_sink;
+use stdout_sink::stdout_sink;
+
+mod http_conn;
+use http_conn::HttpConn;
+
+mod partial_request;
+use partial_request::PartialRequest;
+
+mod partial_response;
+use partial_response::PartialResponse;
 
 fn main() {
     let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
@@ -66,7 +78,8 @@ fn main() {
     let mut events: mio::Events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let mut socket: mio::net::UdpSocket = mio::net::UdpSocket::bind(args.listen.parse().unwrap()).unwrap();
+    let mut socket: mio::net::UdpSocket =
+        mio::net::UdpSocket::bind(args.listen.parse().unwrap()).unwrap();
 
     info!("listening on {:}", socket.local_addr().unwrap());
 
@@ -80,7 +93,6 @@ fn main() {
     // Create the configuration for the QUIC connections.
     let mut config: quiche::Config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 
-    dbg!(&args.cert);
     config.load_cert_chain_from_pem_file(&args.cert).unwrap();
     config.load_priv_key_from_pem_file(&args.key).unwrap();
 
@@ -131,7 +143,8 @@ fn main() {
     }
 
     let rng: SystemRandom = SystemRandom::new();
-    let conn_id_seed: ring::hmac::Key = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
+    let conn_id_seed: ring::hmac::Key =
+        ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
     let mut next_client_id: u64 = 0;
     let mut clients_ids: HashMap<ConnectionId<'static>, u64> = ClientIdMap::new();
@@ -861,54 +874,7 @@ impl Default for CommonArgs {
     }
 }
 
-pub const CLIENT_USAGE: &str = "Usage:
-  quiche-client [options] URL...
-  quiche-client -h | --help
-
-Options:
-  --method METHOD          Use the given HTTP request method [default: GET].
-  --body FILE              Send the given file as request body.
-  --max-data BYTES         Connection-wide flow control limit [default: 10000000].
-  --max-window BYTES       Connection-wide max receiver window [default: 25165824].
-  --max-stream-data BYTES  Per-stream flow control limit [default: 1000000].
-  --max-stream-window BYTES   Per-stream max receiver window [default: 16777216].
-  --max-streams-bidi STREAMS  Number of allowed concurrent streams [default: 100].
-  --max-streams-uni STREAMS   Number of allowed concurrent streams [default: 100].
-  --idle-timeout TIMEOUT   Idle timeout in milliseconds [default: 30000].
-  --wire-version VERSION   The version number to send to the server [default: babababa].
-  --http-version VERSION   HTTP version to use [default: all].
-  --early-data             Enable sending early data.
-  --dgram-proto PROTO      DATAGRAM application protocol to use [default: none].
-  --dgram-count COUNT      Number of DATAGRAMs to send [default: 0].
-  --dgram-data DATA        Data to send for certain types of DATAGRAM application protocol [default: quack].
-  --dump-packets PATH      Dump the incoming packets as files in the given directory.
-  --dump-responses PATH    Dump response payload as files in the given directory.
-  --dump-json              Dump response headers and payload to stdout in JSON format.
-  --max-json-payload BYTES  Per-response payload limit when dumping JSON [default: 10000].
-  --connect-to ADDRESS     Override the server's address.
-  --no-verify              Don't verify server's certificate.
-  --trust-origin-ca-pem <file>  Path to the pem file of the origin's CA, if not publicly trusted.
-  --no-grease              Don't send GREASE.
-  --cc-algorithm NAME      Specify which congestion control algorithm to use [default: cubic].
-  --disable-hystart        Disable HyStart++.
-  --max-active-cids NUM    The maximum number of active Connection IDs we can support [default: 2].
-  --enable-active-migration   Enable active connection migration.
-  --perform-migration      Perform connection migration on another source port.
-  -H --header HEADER ...   Add a request header.
-  -n --requests REQUESTS   Send the given number of identical requests [default: 1].
-  --send-priority-update   Send HTTP/3 priority updates if the query string params 'u' or 'i' are present in URLs
-  --max-field-section-size BYTES    Max size of uncompressed field section. Default is unlimited.
-  --qpack-max-table-capacity BYTES  Max capacity of dynamic QPACK decoding.. Any value other that 0 is currently unsupported.
-  --qpack-blocked-streams STREAMS   Limit of blocked streams while decoding. Any value other that 0 is currently unsupported.
-  --session-file PATH      File used to cache a TLS session for resumption.
-  --source-port PORT       Source port to use when connecting to the server [default: 0].
-  --initial-rtt MILLIS     The initial RTT in milliseconds [default: 333].
-  --initial-cwnd-packets PACKETS   The initial congestion window size in terms of packet count [default: 10].
-  -h --help                Show this screen.
-";
-
 /// Application-specific arguments that compliment the `CommonArgs`.
-
 
 pub const SERVER_USAGE: &str = "Usage:
   quiche-server [options]
@@ -989,10 +955,6 @@ impl ServerArgs {
     }
 }
 
-pub fn stdout_sink(out: String) {
-    print!("{out}");
-}
-
 const H3_MESSAGE_ERROR: u64 = 0x10E;
 
 /// ALPN helpers.
@@ -1003,19 +965,6 @@ pub mod alpns {
     pub const HTTP_3: [&[u8]; 1] = [b"h3"];
 }
 
-pub struct PartialRequest {
-    pub req: Vec<u8>,
-}
-
-pub struct PartialResponse {
-    pub headers: Option<Vec<quiche::h3::Header>>,
-    pub priority: Option<quiche::h3::Priority>,
-
-    pub body: Vec<u8>,
-
-    pub written: usize,
-}
-
 pub type ClientId = u64;
 
 pub struct Client {
@@ -1023,7 +972,7 @@ pub struct Client {
 
     pub http_conn: Option<Box<dyn HttpConn>>,
 
-    pub client_id: ClientId,
+    pub client_id: u64,
 
     pub app_proto_selected: bool,
 
@@ -1265,36 +1214,6 @@ fn send_h3_dgram(
         .map_err(|_| quiche::Error::BufferTooShort)?;
 
     conn.dgram_send(&d)
-}
-
-pub trait HttpConn {
-    fn send_requests(&mut self, conn: &mut quiche::Connection, target_path: &Option<String>);
-
-    fn handle_responses(
-        &mut self,
-        conn: &mut quiche::Connection,
-        buf: &mut [u8],
-        req_start: &std::time::Instant,
-    );
-
-    fn report_incomplete(&self, start: &std::time::Instant) -> bool;
-
-    fn handle_requests(
-        &mut self,
-        conn: &mut quiche::Connection,
-        partial_requests: &mut HashMap<u64, PartialRequest>,
-        partial_responses: &mut HashMap<u64, PartialResponse>,
-        root: &str,
-        index: &str,
-        buf: &mut [u8],
-    ) -> quiche::h3::Result<()>;
-
-    fn handle_writable(
-        &mut self,
-        conn: &mut quiche::Connection,
-        partial_responses: &mut HashMap<u64, PartialResponse>,
-        stream_id: u64,
-    );
 }
 
 pub fn writable_response_streams(conn: &quiche::Connection) -> impl Iterator<Item = u64> + use<> {
@@ -2500,13 +2419,11 @@ impl HttpConn for Http3Conn {
     }
 }
 
-
 /// For non-Linux, there is no GSO support.
 #[cfg(not(target_os = "linux"))]
 pub fn detect_gso(_socket: &mio::net::UdpSocket, _segment_size: usize) -> bool {
     false
 }
-
 
 /// For non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
