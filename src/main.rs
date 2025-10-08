@@ -69,7 +69,6 @@ fn main() {
         .unwrap();
 
     let max_datagram_size = MAX_DATAGRAM_SIZE;
-    let enable_gso = false;
 
     // Create the configuration for the QUIC connections.
     let mut config: quiche::Config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -519,8 +518,6 @@ fn main() {
                 &out[..total_write],
                 &dst_info.unwrap(),
                 client.max_datagram_size,
-                pacing,
-                enable_gso,
             ) {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
                     trace!("send() would block");
@@ -2285,17 +2282,6 @@ impl HttpConn for Http3Conn {
     }
 }
 
-/// For non-Linux platforms.
-#[cfg(not(target_os = "linux"))]
-fn send_to_gso_pacing(
-    _socket: &mio::net::UdpSocket,
-    _buf: &[u8],
-    _send_info: &quiche::SendInfo,
-    _segment_size: usize,
-) -> io::Result<usize> {
-    panic!("send_to_gso() should not be called on non-linux platforms");
-}
-
 /// A wrapper function of send_to().
 ///
 /// When GSO and SO_TXTIME are enabled, send packets using send_to_gso().
@@ -2305,20 +2291,7 @@ pub fn send_to(
     buf: &[u8],
     send_info: &quiche::SendInfo,
     segment_size: usize,
-    pacing: bool,
-    enable_gso: bool,
 ) -> io::Result<usize> {
-    if pacing && enable_gso {
-        match send_to_gso_pacing(socket, buf, send_info, segment_size) {
-            Ok(v) => {
-                return Ok(v);
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        }
-    }
-
     let mut off = 0;
     let mut left = buf.len();
     let mut written = 0;
