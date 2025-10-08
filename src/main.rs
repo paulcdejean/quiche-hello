@@ -25,70 +25,48 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use log::{debug, error, info, trace, warn};
-
 use std::io;
-
 use std::net;
-
 use std::io::prelude::*;
-
 use std::collections::HashMap;
-
 use std::convert::TryFrom;
-
 use std::rc::Rc;
-
 use std::cell::RefCell;
-
 use ring::rand::*;
-
 use std::time::Duration;
-
 const MAX_BUF_SIZE: usize = 65507;
-
 const MAX_DATAGRAM_SIZE: usize = 1350;
-
 use quiche::ConnectionId;
-
 use std::cmp;
-
 use std::path;
-
 use std::fmt::Write as _;
-
 use quiche::h3::NameValue;
 use quiche::h3::Priority;
 
+mod mint_token;
+use mint_token::mint_token;
+
+mod validate_token;
+use validate_token::validate_token;
+
 fn main() {
-    let mut buf = [0; MAX_BUF_SIZE];
-    let mut out = [0; MAX_BUF_SIZE];
-    let mut pacing = false;
+    let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
+    let mut out: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
+    let pacing: bool = false;
 
     env_logger::builder().format_timestamp_nanos().init();
 
     // Parse CLI parameters.
-    let docopt = docopt::Docopt::new(SERVER_USAGE).unwrap();
-    let conn_args = CommonArgs::with_docopt(&docopt);
-    let args = ServerArgs::with_docopt(&docopt);
+    let docopt: docopt::Docopt = docopt::Docopt::new(SERVER_USAGE).unwrap();
+    let conn_args: CommonArgs = CommonArgs::with_docopt(&docopt);
+    let args: ServerArgs = ServerArgs::with_docopt(&docopt);
 
     // Setup the event loop.
-    let mut poll = mio::Poll::new().unwrap();
-    let mut events = mio::Events::with_capacity(1024);
+    let mut poll: mio::Poll = mio::Poll::new().unwrap();
+    let mut events: mio::Events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let mut socket = mio::net::UdpSocket::bind(args.listen.parse().unwrap()).unwrap();
-
-    // Set SO_TXTIME socket option on the listening UDP socket for pacing
-    // outgoing packets.
-    if !args.disable_pacing {
-        match set_txtime_sockopt(&socket) {
-            Ok(_) => {
-                pacing = true;
-                debug!("successfully set SO_TXTIME socket option");
-            }
-            Err(e) => debug!("setsockopt failed {e:?}"),
-        };
-    }
+    let mut socket: mio::net::UdpSocket = mio::net::UdpSocket::bind(args.listen.parse().unwrap()).unwrap();
 
     info!("listening on {:}", socket.local_addr().unwrap());
 
@@ -97,16 +75,10 @@ fn main() {
         .unwrap();
 
     let max_datagram_size = MAX_DATAGRAM_SIZE;
-    let enable_gso = if args.disable_gso {
-        false
-    } else {
-        detect_gso(&socket, max_datagram_size)
-    };
-
-    trace!("GSO detected: {enable_gso}");
+    let enable_gso = false;
 
     // Create the configuration for the QUIC connections.
-    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    let mut config: quiche::Config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 
     dbg!(&args.cert);
     config.load_cert_chain_from_pem_file(&args.cert).unwrap();
@@ -136,19 +108,7 @@ fn main() {
 
     config.enable_pacing(pacing);
 
-    let mut keylog = None;
-
-    if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(keylog_path)
-            .unwrap();
-
-        keylog = Some(file);
-
-        config.log_keys();
-    }
+    let mut keylog: Option<std::fs::File> = None;
 
     if conn_args.early_data {
         config.enable_early_data();
@@ -170,18 +130,18 @@ fn main() {
         config.enable_dgram(true, 1000, 1000);
     }
 
-    let rng = SystemRandom::new();
-    let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
+    let rng: SystemRandom = SystemRandom::new();
+    let conn_id_seed: ring::hmac::Key = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
-    let mut next_client_id = 0;
-    let mut clients_ids = ClientIdMap::new();
-    let mut clients = ClientMap::new();
+    let mut next_client_id: u64 = 0;
+    let mut clients_ids: HashMap<ConnectionId<'static>, u64> = ClientIdMap::new();
+    let mut clients: HashMap<u64, Client> = ClientMap::new();
 
-    let mut pkt_count = 0;
+    let mut pkt_count: i32 = 0;
 
-    let mut continue_write = false;
+    let mut continue_write: bool = false;
 
-    let local_addr = socket.local_addr().unwrap();
+    let local_addr: net::SocketAddr = socket.local_addr().unwrap();
 
     loop {
         // Find the shorter timeout from all the active connections.
@@ -193,7 +153,7 @@ fn main() {
             false => clients.values().filter_map(|c| c.conn.timeout()).min(),
         };
 
-        let mut poll_res = poll.poll(&mut events, timeout);
+        let mut poll_res: Result<(), io::Error> = poll.poll(&mut events, timeout);
         while let Err(e) = poll_res.as_ref() {
             if e.kind() == std::io::ErrorKind::Interrupted {
                 trace!("mio poll() call failed, retrying: {e:?}");
@@ -613,60 +573,6 @@ fn main() {
     }
 }
 
-/// Generate a stateless retry token.
-///
-/// The token includes the static string `"quiche"` followed by the IP address
-/// of the client and by the original destination connection ID generated by the
-/// client.
-///
-/// Note that this function is only an example and doesn't do any cryptographic
-/// authenticate of the token. *It should not be used in production system*.
-fn mint_token(hdr: &quiche::Header, src: &net::SocketAddr) -> Vec<u8> {
-    let mut token = Vec::new();
-
-    token.extend_from_slice(b"quiche");
-
-    let addr = match src.ip() {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
-    };
-
-    token.extend_from_slice(&addr);
-    token.extend_from_slice(&hdr.dcid);
-
-    token
-}
-
-/// Validates a stateless retry token.
-///
-/// This checks that the ticket includes the `"quiche"` static string, and that
-/// the client IP address matches the address stored in the ticket.
-///
-/// Note that this function is only an example and doesn't do any cryptographic
-/// authenticate of the token. *It should not be used in production system*.
-fn validate_token<'a>(src: &net::SocketAddr, token: &'a [u8]) -> Option<quiche::ConnectionId<'a>> {
-    if token.len() < 6 {
-        return None;
-    }
-
-    if &token[..6] != b"quiche" {
-        return None;
-    }
-
-    let token = &token[6..];
-
-    let addr = match src.ip() {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
-    };
-
-    if token.len() < addr.len() || &token[..addr.len()] != addr.as_slice() {
-        return None;
-    }
-
-    Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
-}
-
 fn handle_path_events(client: &mut Client) {
     while let Some(qe) = client.conn.path_event_next() {
         match qe {
@@ -734,39 +640,6 @@ fn handle_path_events(client: &mut Client) {
     }
 }
 
-/// Set SO_TXTIME socket option.
-///
-/// This socket option is set to send to kernel the outgoing UDP
-/// packet transmission time in the sendmsg syscall.
-///
-/// Note that this socket option is set only on linux platforms.
-#[cfg(target_os = "linux")]
-fn set_txtime_sockopt(sock: &mio::net::UdpSocket) -> io::Result<()> {
-    use nix::sys::socket::setsockopt;
-    use nix::sys::socket::sockopt::TxTime;
-    use std::os::unix::io::AsFd;
-
-    let config = nix::libc::sock_txtime {
-        clockid: libc::CLOCK_MONOTONIC,
-        flags: 0,
-    };
-
-    setsockopt(&sock.as_fd(), TxTime, &config)?;
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_txtime_sockopt(_: &mio::net::UdpSocket) -> io::Result<()> {
-    use std::io::Error;
-
-    Err(Error::other("Not supported on this platform"))
-}
-
-pub trait Args {
-    fn with_docopt(docopt: &docopt::Docopt) -> Self;
-}
-
 /// Contains commons arguments for creating a quiche QUIC connection.
 pub struct CommonArgs {
     pub alpns: Vec<&'static [u8]>,
@@ -820,7 +693,7 @@ pub struct CommonArgs {
 /// --initial-cwnd-packets      Size of initial congestion window, in packets.
 ///
 /// [`Docopt`]: https://docs.rs/docopt/1.1.0/docopt/
-impl Args for CommonArgs {
+impl CommonArgs {
     fn with_docopt(docopt: &docopt::Docopt) -> Self {
         let args = docopt.parse().unwrap_or_else(|e| e.exit());
 
@@ -1035,140 +908,7 @@ Options:
 ";
 
 /// Application-specific arguments that compliment the `CommonArgs`.
-pub struct ClientArgs {
-    pub version: u32,
-    pub dump_response_path: Option<String>,
-    pub dump_json: Option<usize>,
-    pub urls: Vec<url::Url>,
-    pub reqs_cardinal: u64,
-    pub req_headers: Vec<String>,
-    pub no_verify: bool,
-    pub trust_origin_ca_pem: Option<String>,
-    pub body: Option<Vec<u8>>,
-    pub method: String,
-    pub connect_to: Option<String>,
-    pub session_file: Option<String>,
-    pub source_port: u16,
-    pub perform_migration: bool,
-    pub send_priority_update: bool,
-}
 
-impl Args for ClientArgs {
-    fn with_docopt(docopt: &docopt::Docopt) -> Self {
-        let args = docopt.parse().unwrap_or_else(|e| e.exit());
-
-        let version = args.get_str("--wire-version");
-        let version = u32::from_str_radix(version, 16).unwrap();
-
-        let dump_response_path = if !args.get_str("--dump-responses").is_empty() {
-            Some(args.get_str("--dump-responses").to_string())
-        } else {
-            None
-        };
-
-        let dump_json = args.get_bool("--dump-json");
-        let dump_json = if dump_json {
-            let max_payload = args.get_str("--max-json-payload");
-            let max_payload = max_payload.parse::<usize>().unwrap();
-            Some(max_payload)
-        } else {
-            None
-        };
-
-        // URLs (can be multiple).
-        let urls: Vec<url::Url> = args
-            .get_vec("URL")
-            .into_iter()
-            .map(|x| url::Url::parse(x).unwrap())
-            .collect();
-
-        // Request headers (can be multiple).
-        let req_headers = args
-            .get_vec("--header")
-            .into_iter()
-            .map(|x| x.to_string())
-            .collect();
-
-        let reqs_cardinal = args.get_str("--requests");
-        let reqs_cardinal = reqs_cardinal.parse::<u64>().unwrap();
-
-        let no_verify = args.get_bool("--no-verify");
-
-        let trust_origin_ca_pem = args.get_str("--trust-origin-ca-pem");
-        let trust_origin_ca_pem = if !trust_origin_ca_pem.is_empty() {
-            Some(trust_origin_ca_pem.to_string())
-        } else {
-            None
-        };
-
-        let body = if args.get_bool("--body") {
-            std::fs::read(args.get_str("--body")).ok()
-        } else {
-            None
-        };
-
-        let method = args.get_str("--method").to_string();
-
-        let connect_to = if args.get_bool("--connect-to") {
-            Some(args.get_str("--connect-to").to_string())
-        } else {
-            None
-        };
-
-        let session_file = if args.get_bool("--session-file") {
-            Some(args.get_str("--session-file").to_string())
-        } else {
-            None
-        };
-
-        let source_port = args.get_str("--source-port");
-        let source_port = source_port.parse::<u16>().unwrap();
-
-        let perform_migration = args.get_bool("--perform-migration");
-
-        let send_priority_update = args.get_bool("--send-priority-update");
-
-        ClientArgs {
-            version,
-            dump_response_path,
-            dump_json,
-            urls,
-            reqs_cardinal,
-            req_headers,
-            no_verify,
-            trust_origin_ca_pem,
-            body,
-            method,
-            connect_to,
-            session_file,
-            source_port,
-            perform_migration,
-            send_priority_update,
-        }
-    }
-}
-
-impl Default for ClientArgs {
-    fn default() -> Self {
-        ClientArgs {
-            version: 0xbabababa,
-            dump_response_path: None,
-            dump_json: None,
-            urls: vec![],
-            req_headers: vec![],
-            reqs_cardinal: 1,
-            no_verify: false,
-            trust_origin_ca_pem: None,
-            body: None,
-            method: "GET".to_string(),
-            connect_to: None,
-            session_file: None,
-            source_port: 0,
-            perform_migration: false,
-            send_priority_update: false,
-        }
-    }
-}
 
 pub const SERVER_USAGE: &str = "Usage:
   quiche-server [options]
@@ -1203,8 +943,6 @@ Options:
   --max-field-section-size BYTES    Max size of uncompressed HTTP/3 field section. Default is unlimited.
   --qpack-max-table-capacity BYTES  Max capacity of QPACK dynamic table decoding. Any value other that 0 is currently unsupported.
   --qpack-blocked-streams STREAMS   Limit of streams that can be blocked while decoding. Any value other that 0 is currently unsupported.
-  --disable-gso               Disable GSO (linux only).
-  --disable-pacing            Disable pacing (linux only).
   --initial-rtt MILLIS     The initial RTT in milliseconds [default: 333].
   --initial-cwnd-packets PACKETS      The initial congestion window size in terms of packet count [default: 10].
   -h --help                   Show this screen.
@@ -1223,7 +961,7 @@ pub struct ServerArgs {
     pub enable_pmtud: bool,
 }
 
-impl Args for ServerArgs {
+impl ServerArgs {
     fn with_docopt(docopt: &docopt::Docopt) -> Self {
         let args = docopt.parse().unwrap_or_else(|e| e.exit());
 
