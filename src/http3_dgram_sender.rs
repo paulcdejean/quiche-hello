@@ -5,7 +5,6 @@ pub struct Http3DgramSender {
     pub dgrams_sent: u64,
 }
 
-#[allow(dead_code)]
 impl Http3DgramSender {
     pub fn new(dgram_count: u64, dgram_content: String, flow_id: u64) -> Self {
         Self {

@@ -1,11 +1,9 @@
 use log::{debug, error, info, trace};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::prelude::*;
 use std::path;
 use std::rc::Rc;
 
-use crate::make_resource_writer::make_resource_writer;
 use crate::partial_request::PartialRequest;
 use crate::partial_response::PartialResponse;
 
@@ -14,7 +12,6 @@ use crate::autoindex::autoindex;
 use crate::stdout_sink::stdout_sink;
 
 /// Represents an HTTP/0.9 formatted request.
-#[allow(dead_code)]
 pub struct Http09Request {
     url: url::Url,
     cardinal: u64,
@@ -23,7 +20,6 @@ pub struct Http09Request {
     response_writer: Option<std::io::BufWriter<std::fs::File>>,
 }
 
-#[allow(dead_code)]
 pub struct Http09Conn {
     stream_id: u64,
     reqs_sent: usize,
@@ -33,118 +29,6 @@ pub struct Http09Conn {
 }
 
 impl HttpConn for Http09Conn {
-    fn send_requests(&mut self, conn: &mut quiche::Connection, target_path: &Option<String>) {
-        let mut reqs_done = 0;
-
-        for req in self.reqs.iter_mut().skip(self.reqs_sent) {
-            match conn.stream_send(self.stream_id, req.request_line.as_bytes(), true) {
-                Ok(v) => v,
-
-                Err(quiche::Error::StreamLimit) => {
-                    debug!("not enough stream credits, retry later...");
-                    break;
-                }
-
-                Err(e) => {
-                    error!("failed to send request {e:?}");
-                    break;
-                }
-            };
-
-            debug!("sending HTTP request {:?}", req.request_line);
-
-            req.stream_id = Some(self.stream_id);
-            req.response_writer = make_resource_writer(&req.url, target_path, req.cardinal);
-
-            self.stream_id += 4;
-
-            reqs_done += 1;
-        }
-
-        self.reqs_sent += reqs_done;
-    }
-
-    fn handle_responses(
-        &mut self,
-        conn: &mut quiche::Connection,
-        buf: &mut [u8],
-        req_start: &std::time::Instant,
-    ) {
-        // Process all readable streams.
-        for s in conn.readable() {
-            while let Ok((read, fin)) = conn.stream_recv(s, buf) {
-                trace!("received {read} bytes");
-
-                let stream_buf = &buf[..read];
-
-                trace!("stream {} has {} bytes (fin? {})", s, stream_buf.len(), fin);
-
-                let req = self
-                    .reqs
-                    .iter_mut()
-                    .find(|r| r.stream_id == Some(s))
-                    .unwrap();
-
-                match &mut req.response_writer {
-                    Some(rw) => {
-                        rw.write_all(&buf[..read]).ok();
-                    }
-
-                    None => {
-                        self.output_sink.borrow_mut()(unsafe {
-                            String::from_utf8_unchecked(stream_buf.to_vec())
-                        });
-                    }
-                }
-
-                // The server reported that it has no more data to send on
-                // a client-initiated
-                // bidirectional stream, which means
-                // we got the full response. If all responses are received
-                // then close the connection.
-                if &s % 4 == 0 && fin {
-                    self.reqs_complete += 1;
-                    let reqs_count = self.reqs.len();
-
-                    debug!("{}/{} responses received", self.reqs_complete, reqs_count);
-
-                    if self.reqs_complete == reqs_count {
-                        info!(
-                            "{}/{} response(s) received in {:?}, closing...",
-                            self.reqs_complete,
-                            reqs_count,
-                            req_start.elapsed()
-                        );
-
-                        match conn.close(true, 0x00, b"kthxbye") {
-                            // Already closed.
-                            Ok(_) | Err(quiche::Error::Done) => (),
-
-                            Err(e) => panic!("error closing conn: {e:?}"),
-                        }
-
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    fn report_incomplete(&self, start: &std::time::Instant) -> bool {
-        if self.reqs_complete != self.reqs.len() {
-            error!(
-                "connection timed out after {:?} and only completed {}/{} requests",
-                start.elapsed(),
-                self.reqs_complete,
-                self.reqs.len()
-            );
-
-            return true;
-        }
-
-        false
-    }
-
     fn handle_requests(
         &mut self,
         conn: &mut quiche::Connection,
