@@ -1,6 +1,3 @@
-const MAX_BUF_SIZE: usize = 65507;
-const MAX_DATAGRAM_SIZE: usize = 1350;
-
 use log::{debug, error, info, trace, warn};
 use ring::rand::*;
 use std::cell::RefCell;
@@ -41,6 +38,15 @@ use make_resource_writer::make_resource_writer;
 
 mod client;
 use client::{Client, ClientIdMap, ClientMap};
+
+mod handle_path_events;
+use handle_path_events::handle_path_events;
+
+mod constants;
+use constants::{H3_MESSAGE_ERROR, MAX_BUF_SIZE, MAX_DATAGRAM_SIZE};
+
+mod autoindex;
+use autoindex::autoindex;
 
 fn main() {
     let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
@@ -95,21 +101,14 @@ fn main() {
     config.set_max_stream_window(16777216);
     config.enable_pacing(pacing);
 
-
     let mut keylog: Option<std::fs::File> = None;
-
     let rng: SystemRandom = SystemRandom::new();
     let conn_id_seed: ring::hmac::Key =
         ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
-
     let mut next_client_id: u64 = 0;
     let mut clients_ids: HashMap<ConnectionId<'static>, u64> = ClientIdMap::new();
     let mut clients: HashMap<u64, Client> = ClientMap::new();
-
-    // let mut pkt_count: i32 = 0;
-
     let mut continue_write: bool = false;
-
     let local_addr: net::SocketAddr = socket.local_addr().unwrap();
 
     loop {
@@ -517,92 +516,12 @@ fn main() {
     }
 }
 
-fn handle_path_events(client: &mut Client) {
-    while let Some(qe) = client.conn.path_event_next() {
-        match qe {
-            quiche::PathEvent::New(local_addr, peer_addr) => {
-                info!(
-                    "{} Seen new path ({}, {})",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-
-                // Directly probe the new path.
-                client
-                    .conn
-                    .probe_path(local_addr, peer_addr)
-                    .expect("cannot probe");
-            }
-
-            quiche::PathEvent::Validated(local_addr, peer_addr) => {
-                info!(
-                    "{} Path ({}, {}) is now validated",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-            }
-
-            quiche::PathEvent::FailedValidation(local_addr, peer_addr) => {
-                info!(
-                    "{} Path ({}, {}) failed validation",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-            }
-
-            quiche::PathEvent::Closed(local_addr, peer_addr) => {
-                info!(
-                    "{} Path ({}, {}) is now closed and unusable",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-            }
-
-            quiche::PathEvent::ReusedSourceConnectionId(cid_seq, old, new) => {
-                info!(
-                    "{} Peer reused cid seq {} (initially {:?}) on {:?}",
-                    client.conn.trace_id(),
-                    cid_seq,
-                    old,
-                    new
-                );
-            }
-
-            quiche::PathEvent::PeerMigrated(local_addr, peer_addr) => {
-                info!(
-                    "{} Connection migrated to ({}, {})",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-            }
-        }
-    }
-}
-
-const H3_MESSAGE_ERROR: u64 = 0x10E;
-
 /// ALPN helpers.
 ///
 /// This module contains constants and functions for working with ALPN.
 pub mod alpns {
     pub const HTTP_09: [&[u8]; 2] = [b"hq-interop", b"http/0.9"];
     pub const HTTP_3: [&[u8]; 1] = [b"h3"];
-}
-
-fn autoindex(path: path::PathBuf, index: &str) -> path::PathBuf {
-    if let Some(path_str) = path.to_str() {
-        if path_str.ends_with('/') {
-            let path_str = format!("{path_str}{index}");
-            return path::PathBuf::from(&path_str);
-        }
-    }
-
-    path
 }
 
 fn dump_json(reqs: &[Http3Request], output_sink: &mut dyn FnMut(String)) {
@@ -822,37 +741,7 @@ impl Default for Http09Conn {
     }
 }
 
-impl Http09Conn {
-    pub fn with_urls(
-        urls: &[url::Url],
-        reqs_cardinal: u64,
-        output_sink: Rc<RefCell<dyn FnMut(String)>>,
-    ) -> Box<dyn HttpConn> {
-        let mut reqs = Vec::new();
-        for url in urls {
-            for i in 1..=reqs_cardinal {
-                let request_line = format!("GET {}\r\n", url.path());
-                reqs.push(Http09Request {
-                    url: url.clone(),
-                    cardinal: i,
-                    request_line,
-                    stream_id: None,
-                    response_writer: None,
-                });
-            }
-        }
-
-        let h_conn = Http09Conn {
-            stream_id: 0,
-            reqs_sent: 0,
-            reqs_complete: 0,
-            reqs,
-            output_sink,
-        };
-
-        Box::new(h_conn)
-    }
-}
+impl Http09Conn {}
 
 impl HttpConn for Http09Conn {
     fn send_requests(&mut self, conn: &mut quiche::Connection, target_path: &Option<String>) {
@@ -1172,101 +1061,6 @@ pub struct Http3Conn {
 
 impl Http3Conn {
     #[allow(clippy::too_many_arguments)]
-    pub fn with_urls(
-        conn: &mut quiche::Connection,
-        urls: &[url::Url],
-        reqs_cardinal: u64,
-        req_headers: &[String],
-        body: &Option<Vec<u8>>,
-        method: &str,
-        send_priority_update: bool,
-        max_field_section_size: Option<u64>,
-        qpack_max_table_capacity: Option<u64>,
-        qpack_blocked_streams: Option<u64>,
-        dump_json: Option<usize>,
-        dgram_sender: Option<Http3DgramSender>,
-        output_sink: Rc<RefCell<dyn FnMut(String)>>,
-    ) -> Box<dyn HttpConn> {
-        let mut reqs = Vec::new();
-        for url in urls {
-            for i in 1..=reqs_cardinal {
-                let authority = match url.port() {
-                    Some(port) => format!("{}:{}", url.host_str().unwrap(), port),
-
-                    None => url.host_str().unwrap().to_string(),
-                };
-
-                let mut hdrs = vec![
-                    quiche::h3::Header::new(b":method", method.as_bytes()),
-                    quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
-                    quiche::h3::Header::new(b":authority", authority.as_bytes()),
-                    quiche::h3::Header::new(b":path", url[url::Position::BeforePath..].as_bytes()),
-                    quiche::h3::Header::new(b"user-agent", b"quiche"),
-                ];
-
-                let priority = if send_priority_update {
-                    priority_from_query_string(url)
-                } else {
-                    None
-                };
-
-                // Add custom headers to the request.
-                for header in req_headers {
-                    let header_split: Vec<&str> = header.splitn(2, ": ").collect();
-
-                    if header_split.len() != 2 {
-                        panic!("malformed header provided - \"{header}\"");
-                    }
-
-                    hdrs.push(quiche::h3::Header::new(
-                        header_split[0].as_bytes(),
-                        header_split[1].as_bytes(),
-                    ));
-                }
-
-                if body.is_some() {
-                    hdrs.push(quiche::h3::Header::new(
-                        b"content-length",
-                        body.as_ref().unwrap().len().to_string().as_bytes(),
-                    ));
-                }
-
-                reqs.push(Http3Request {
-                    url: url.clone(),
-                    cardinal: i,
-                    hdrs,
-                    priority,
-                    response_hdrs: Vec::new(),
-                    response_body: Vec::new(),
-                    response_body_max: dump_json.unwrap_or_default(),
-                    stream_id: None,
-                    response_writer: None,
-                });
-            }
-        }
-
-        let h_conn = Http3Conn {
-            h3_conn: quiche::h3::Connection::with_transport(
-                conn,
-                &make_h3_config(
-                    max_field_section_size,
-                    qpack_max_table_capacity,
-                    qpack_blocked_streams,
-                ),
-            ).expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
-            reqs_hdrs_sent: 0,
-            reqs_complete: 0,
-            largest_processed_request: 0,
-            reqs,
-            body: body.as_ref().map(|b| b.to_vec()),
-            sent_body_bytes: HashMap::new(),
-            dump_json: dump_json.is_some(),
-            dgram_sender,
-            output_sink,
-        };
-
-        Box::new(h_conn)
-    }
 
     pub fn with_conn(
         conn: &mut quiche::Connection,
