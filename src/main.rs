@@ -44,7 +44,6 @@ use writable_response_streams::writable_response_streams;
 fn main() {
     let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
     let mut out: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
-
     env_logger::builder().format_timestamp_nanos().init();
 
     // Setup the event loop.
@@ -61,10 +60,7 @@ fn main() {
         .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
         .unwrap();
 
-    let max_datagram_size = MAX_DATAGRAM_SIZE;
-
     // Create the configuration for the QUIC connections.
-    // let mut config: quiche::Config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     let mut config: quiche::Config = example_config();
 
     let rng: SystemRandom = SystemRandom::new();
@@ -244,7 +240,7 @@ fn main() {
                     partial_requests: HashMap::new(),
                     partial_responses: HashMap::new(),
                     app_proto_selected: false,
-                    max_datagram_size,
+                    max_datagram_size: MAX_DATAGRAM_SIZE,
                     loss_rate: 0.0,
                     max_send_burst: MAX_BUF_SIZE,
                 };
