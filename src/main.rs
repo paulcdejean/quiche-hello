@@ -526,84 +526,6 @@ pub mod alpns {
     pub const HTTP_09: [&[u8]; 2] = [b"hq-interop", b"http/0.9"];
     pub const HTTP_3: [&[u8]; 1] = [b"h3"];
 }
-
-fn dump_json(reqs: &[Http3Request], output_sink: &mut dyn FnMut(String)) {
-    let mut out = String::new();
-
-    writeln!(out, "{{").unwrap();
-    writeln!(out, "  \"entries\": [").unwrap();
-    let mut reqs = reqs.iter().peekable();
-
-    while let Some(req) = reqs.next() {
-        writeln!(out, "  {{").unwrap();
-        writeln!(out, "    \"request\":{{").unwrap();
-        writeln!(out, "      \"headers\":[").unwrap();
-
-        let mut req_hdrs = req.hdrs.iter().peekable();
-        while let Some(h) = req_hdrs.next() {
-            writeln!(out, "        {{").unwrap();
-            writeln!(
-                out,
-                "          \"name\": \"{}\",",
-                std::str::from_utf8(h.name()).unwrap()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "          \"value\": \"{}\"",
-                std::str::from_utf8(h.value()).unwrap().replace('"', "\\\"")
-            )
-            .unwrap();
-
-            if req_hdrs.peek().is_some() {
-                writeln!(out, "        }},").unwrap();
-            } else {
-                writeln!(out, "        }}").unwrap();
-            }
-        }
-        writeln!(out, "      ]}},").unwrap();
-
-        writeln!(out, "    \"response\":{{").unwrap();
-        writeln!(out, "      \"headers\":[").unwrap();
-
-        let mut response_hdrs = req.response_hdrs.iter().peekable();
-        while let Some(h) = response_hdrs.next() {
-            writeln!(out, "        {{").unwrap();
-            writeln!(
-                out,
-                "          \"name\": \"{}\",",
-                std::str::from_utf8(h.name()).unwrap()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "          \"value\": \"{}\"",
-                std::str::from_utf8(h.value()).unwrap().replace('"', "\\\"")
-            )
-            .unwrap();
-
-            if response_hdrs.peek().is_some() {
-                writeln!(out, "        }},").unwrap();
-            } else {
-                writeln!(out, "        }}").unwrap();
-            }
-        }
-        writeln!(out, "      ],").unwrap();
-        writeln!(out, "      \"body\": {:?}", req.response_body).unwrap();
-        writeln!(out, "    }}").unwrap();
-
-        if reqs.peek().is_some() {
-            writeln!(out, "}},").unwrap();
-        } else {
-            writeln!(out, "}}").unwrap();
-        }
-    }
-    writeln!(out, "]").unwrap();
-    writeln!(out, "}}").unwrap();
-
-    output_sink(out);
-}
-
 pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
     hdrs.iter()
         .map(|h| {
@@ -743,7 +665,6 @@ impl Default for Http09Conn {
         }
     }
 }
-
 
 impl HttpConn for Http09Conn {
     fn send_requests(&mut self, conn: &mut quiche::Connection, target_path: &Option<String>) {
@@ -1038,7 +959,6 @@ pub struct Http3Conn {
     reqs: Vec<Http3Request>,
     body: Option<Vec<u8>>,
     sent_body_bytes: HashMap<u64, usize>,
-    dump_json: bool,
     dgram_sender: Option<Http3DgramSender>,
     output_sink: Rc<RefCell<dyn FnMut(String)>>,
 }
@@ -1071,7 +991,6 @@ impl Http3Conn {
             reqs: Vec::new(),
             body: None,
             sent_body_bytes: HashMap::new(),
-            dump_json: false,
             dgram_sender,
             output_sink,
         };
@@ -1402,11 +1321,9 @@ impl HttpConn for Http3Conn {
                             }
 
                             None => {
-                                if !self.dump_json {
-                                    self.output_sink.borrow_mut()(unsafe {
-                                        String::from_utf8_unchecked(buf[..read].to_vec())
-                                    });
-                                }
+                                self.output_sink.borrow_mut()(unsafe {
+                                    String::from_utf8_unchecked(buf[..read].to_vec())
+                                });
                             }
                         }
                     }
@@ -1425,10 +1342,6 @@ impl HttpConn for Http3Conn {
                             reqs_count,
                             req_start.elapsed()
                         );
-
-                        if self.dump_json {
-                            dump_json(&self.reqs, &mut *self.output_sink.borrow_mut());
-                        }
 
                         match conn.close(true, 0x100, b"kthxbye") {
                             // Already closed.
@@ -1500,10 +1413,6 @@ impl HttpConn for Http3Conn {
                 self.reqs_complete,
                 self.reqs.len()
             );
-
-            if self.dump_json {
-                dump_json(&self.reqs, &mut *self.output_sink.borrow_mut());
-            }
 
             return true;
         }
