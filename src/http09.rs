@@ -14,6 +14,7 @@ use crate::autoindex::autoindex;
 use crate::stdout_sink::stdout_sink;
 
 /// Represents an HTTP/0.9 formatted request.
+#[allow(dead_code)]
 pub struct Http09Request {
     url: url::Url,
     cardinal: u64,
@@ -22,6 +23,7 @@ pub struct Http09Request {
     response_writer: Option<std::io::BufWriter<std::fs::File>>,
 }
 
+#[allow(dead_code)]
 pub struct Http09Conn {
     stream_id: u64,
     reqs_sent: usize,

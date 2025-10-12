@@ -4,6 +4,8 @@
 /// Multiple requests for the same URL are indicated by the value of `cardinal`,
 /// any value "N" greater than 1, will cause ".N" to be appended to the
 /// filename.
+
+#[allow(dead_code)]
 pub fn make_resource_writer(
     url: &url::Url,
     target_path: &Option<String>,

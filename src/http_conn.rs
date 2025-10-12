@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::partial_request::PartialRequest;
 use crate::partial_response::PartialResponse;
 
+#[allow(dead_code)]
 pub trait HttpConn {
     fn send_requests(&mut self, conn: &mut quiche::Connection, target_path: &Option<String>);
 
