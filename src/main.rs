@@ -2,7 +2,6 @@ use std::cmp;
 use std::collections::HashMap;
 use std::net;
 
-use log::{debug, error, info, trace, warn};
 use quiche::ConnectionId;
 use ring::rand::*;
 
@@ -29,16 +28,15 @@ mod validate_token;
 mod writable_response_streams;
 
 use client::{Client, ClientIdMap, ClientMap};
-use constants::{MAX_BUF_SIZE, MAX_DATAGRAM_SIZE};
+use constants::MAX_BUF_SIZE;
 use example_config::example_config;
 
 use http_conn::HttpConn;
 
 use inner_loop::inner_loop;
 
-
 fn main() {
-    let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
+    let buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
     let mut out: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
     env_logger::builder().format_timestamp_nanos().init();
 
@@ -50,7 +48,7 @@ fn main() {
     let mut socket: mio::net::UdpSocket =
         mio::net::UdpSocket::bind("127.0.0.1:4433".parse().unwrap()).unwrap();
 
-    info!("listening on {:}", socket.local_addr().unwrap());
+    log::info!("listening on {:}", socket.local_addr().unwrap());
 
     poll.registry()
         .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
@@ -81,7 +79,7 @@ fn main() {
         let mut poll_res: Result<(), std::io::Error> = poll.poll(&mut events, timeout);
         while let Err(e) = poll_res.as_ref() {
             if e.kind() == std::io::ErrorKind::Interrupted {
-                trace!("mio poll() call failed, retrying: {e:?}");
+                log::trace!("mio poll() call failed, retrying: {e:?}");
                 poll_res = poll.poll(&mut events, timeout);
             } else {
                 panic!("mio poll() call failed fatally: {e:?}");
@@ -93,14 +91,14 @@ fn main() {
         inner_loop(
             &mut events,
             continue_write,
-            clients,
+            &mut clients,
             &mut socket,
             buf,
             local_addr,
-            conn_id_seed,
-            clients_ids,
+            &conn_id_seed,
+            &mut clients_ids,
             out,
-            config,
+            &mut config,
             &mut next_client_id,
             &rng,
         );
@@ -131,12 +129,12 @@ fn main() {
                         Ok(v) => v,
 
                         Err(quiche::Error::Done) => {
-                            trace!("{} done writing", client.conn.trace_id());
+                            log::trace!("{} done writing", client.conn.trace_id());
                             break;
                         }
 
                         Err(e) => {
-                            error!("{} send failed: {:?}", client.conn.trace_id(), e);
+                            log::error!("{} send failed: {:?}", client.conn.trace_id(), e);
 
                             client.conn.close(false, 0x1, b"fail").ok();
                             break;
@@ -165,20 +163,20 @@ fn main() {
                 client.max_datagram_size,
             ) {
                 if e.kind() == std::io::ErrorKind::WouldBlock {
-                    trace!("send() would block");
+                    log::trace!("send() would block");
                     break;
                 }
 
                 panic!("send_to() failed: {e:?}");
             }
 
-            trace!(
+            log::trace!(
                 "{} written {total_write} bytes with {dst_info:?}",
                 client.conn.trace_id()
             );
 
             if total_write >= max_send_burst {
-                trace!("{} pause writing", client.conn.trace_id(),);
+                log::trace!("{} pause writing", client.conn.trace_id(),);
                 continue_write = true;
                 break;
             }
@@ -186,10 +184,10 @@ fn main() {
 
         // Garbage collect closed connections.
         clients.retain(|_, ref mut c| {
-            trace!("Collecting garbage");
+            log::trace!("Collecting garbage");
 
             if c.conn.is_closed() {
-                info!(
+                log::info!(
                     "{} connection collected {:?} {:?}",
                     c.conn.trace_id(),
                     c.conn.stats(),
@@ -206,11 +204,6 @@ fn main() {
         });
     }
 }
-
-/// ALPN helpers.
-///
-/// This module contains constants and functions for working with ALPN.
-
 
 /// A wrapper function of send_to().
 ///

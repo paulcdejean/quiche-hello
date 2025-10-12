@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use ring::rand::*;
+use std::collections::HashMap;
 
 use log::{debug, error, info, trace, warn};
 
@@ -21,30 +21,34 @@ use crate::handle_path_events::handle_path_events;
 
 use crate::http_conn::HttpConn;
 
-
+/// ALPN helpers.
+///
+/// This module contains constants and functions for working with ALPN.
 pub mod alpns {
     pub const HTTP_09: [&[u8]; 2] = [b"hq-interop", b"http/0.9"];
     pub const HTTP_3: [&[u8]; 1] = [b"h3"];
 }
 
-// Read incoming UDP packets from the socket and feed them to quiche,
-// until there are no more packets to read.
+// Too many args? Tell me about it...
+// Still better than a huge inner loop
 
+/// Read incoming UDP packets from the socket and feed them to quiche,
+/// until there are no more packets to read.
 pub fn inner_loop(
     events: &mut mio::Events,
     continue_write: bool,
-    mut clients: HashMap<u64, Client>,
+    clients: &mut HashMap<u64, Client>,
     socket: &mut mio::net::UdpSocket,
     mut buf: [u8; MAX_BUF_SIZE],
     local_addr: std::net::SocketAddr,
-    conn_id_seed: ring::hmac::Key,
-    mut clients_ids: HashMap<ConnectionId<'static>, u64>,
+    conn_id_seed: &ring::hmac::Key,
+    clients_ids: &mut HashMap<ConnectionId<'static>, u64>,
     mut out: [u8; MAX_BUF_SIZE],
-    mut config: quiche::Config,
+    config: &mut quiche::Config,
     next_client_id: &mut u64,
     rng: &SystemRandom,
 ) {
-    'read: loop {
+    loop {
         // If the event loop reported no events, it means that the timeout
         // has expired, so handle it without attempting to read packets. We
         // will then proceed with the send loop.
@@ -53,7 +57,7 @@ pub fn inner_loop(
 
             clients.values_mut().for_each(|c| c.conn.on_timeout());
 
-            break 'read;
+            break;
         }
 
         let (len, from) = match socket.recv_from(&mut buf) {
@@ -64,7 +68,7 @@ pub fn inner_loop(
                 // loop.
                 if e.kind() == std::io::ErrorKind::WouldBlock {
                     trace!("recv() would block");
-                    break 'read;
+                    break;
                 }
 
                 panic!("recv() failed: {e:?}");
@@ -81,13 +85,13 @@ pub fn inner_loop(
 
             Err(e) => {
                 error!("Parsing packet header failed: {e:?}");
-                continue 'read;
+                continue;
             }
         };
 
         trace!("got packet {hdr:?}");
 
-        let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
+        let conn_id = ring::hmac::sign(conn_id_seed, &hdr.dcid);
         let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
         let conn_id: quiche::ConnectionId<'static> = conn_id.to_vec().into();
 
@@ -97,7 +101,7 @@ pub fn inner_loop(
         {
             if hdr.ty != quiche::Type::Initial {
                 error!("Packet is not Initial");
-                continue 'read;
+                continue;
             }
 
             if !quiche::version_is_supported(hdr.version) {
@@ -115,7 +119,7 @@ pub fn inner_loop(
 
                     panic!("send() failed: {e:?}");
                 }
-                continue 'read;
+                continue;
             }
 
             let mut scid = [0; quiche::MAX_CONN_ID_LEN];
@@ -151,7 +155,7 @@ pub fn inner_loop(
 
                     panic!("send() failed: {e:?}");
                 }
-                continue 'read;
+                continue;
             }
 
             let odcid = validate_token(&from, token);
@@ -165,7 +169,7 @@ pub fn inner_loop(
 
             if scid.len() != hdr.dcid.len() {
                 error!("Invalid destination connection ID");
-                continue 'read;
+                continue;
             }
 
             // Reuse the source connection ID we sent in the Retry
@@ -177,8 +181,7 @@ pub fn inner_loop(
             debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
             #[allow(unused_mut)]
-            let mut conn =
-                quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut config).unwrap();
+            let mut conn = quiche::accept(&scid, odcid.as_ref(), local_addr, from, config).unwrap();
 
             let client_id = *next_client_id;
 
@@ -221,7 +224,7 @@ pub fn inner_loop(
 
             Err(e) => {
                 error!("{} recv failed: {:?}", client.conn.trace_id(), e);
-                continue 'read;
+                continue;
             }
         };
 
@@ -289,7 +292,7 @@ pub fn inner_loop(
                 )
                 .is_err()
             {
-                continue 'read;
+                continue;
             }
         }
 
