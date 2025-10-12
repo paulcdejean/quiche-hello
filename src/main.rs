@@ -5,7 +5,6 @@ use log::{debug, error, info, trace, warn};
 use ring::rand::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::io;
 use std::io::prelude::*;
 use std::net;
@@ -51,8 +50,6 @@ fn main() {
     env_logger::builder().format_timestamp_nanos().init();
 
     // Parse CLI parameters.
-    let docopt: docopt::Docopt = docopt::Docopt::new(SERVER_USAGE).unwrap();
-    let conn_args: CommonArgs = CommonArgs::with_docopt(&docopt);
 
     // Setup the event loop.
     let mut poll: mio::Poll = mio::Poll::new().unwrap();
@@ -77,52 +74,29 @@ fn main() {
         .load_cert_chain_from_pem_file("cert/cert.crt")
         .unwrap();
     config.load_priv_key_from_pem_file("cert/cert.key").unwrap();
-
-    config.set_application_protos(&conn_args.alpns).unwrap();
-
+    config
+        .set_application_protos(&alpns::HTTP_3.to_vec())
+        .unwrap();
     config.discover_pmtu(false);
-    config.set_initial_rtt(conn_args.initial_rtt);
-    config.set_max_idle_timeout(conn_args.idle_timeout);
+    config.set_initial_rtt(Duration::from_millis(333));
+    config.set_max_idle_timeout(30000);
     config.set_max_recv_udp_payload_size(max_datagram_size);
     config.set_max_send_udp_payload_size(max_datagram_size);
-    config.set_initial_max_data(conn_args.max_data);
-    config.set_initial_max_stream_data_bidi_local(conn_args.max_stream_data);
-    config.set_initial_max_stream_data_bidi_remote(conn_args.max_stream_data);
-    config.set_initial_max_stream_data_uni(conn_args.max_stream_data);
-    config.set_initial_max_streams_bidi(conn_args.max_streams_bidi);
-    config.set_initial_max_streams_uni(conn_args.max_streams_uni);
-    config.set_disable_active_migration(!conn_args.enable_active_migration);
-    config.set_active_connection_id_limit(conn_args.max_active_cids);
-    config.set_initial_congestion_window_packets(
-        usize::try_from(conn_args.initial_cwnd_packets).unwrap(),
-    );
-
-    config.set_max_connection_window(conn_args.max_window);
-    config.set_max_stream_window(conn_args.max_stream_window);
-
+    config.set_initial_max_data(10000000);
+    config.set_initial_max_stream_data_bidi_local(1000000);
+    config.set_initial_max_stream_data_bidi_remote(1000000);
+    config.set_initial_max_stream_data_uni(1000000);
+    config.set_initial_max_streams_bidi(100);
+    config.set_initial_max_streams_uni(100);
+    config.set_disable_active_migration(true);
+    config.set_active_connection_id_limit(2);
+    config.set_initial_congestion_window_packets(10);
+    config.set_max_connection_window(25165824);
+    config.set_max_stream_window(16777216);
     config.enable_pacing(pacing);
 
+
     let mut keylog: Option<std::fs::File> = None;
-
-    if conn_args.early_data {
-        config.enable_early_data();
-    }
-
-    if conn_args.no_grease {
-        config.grease(false);
-    }
-
-    config
-        .set_cc_algorithm_name(&conn_args.cc_algorithm)
-        .unwrap();
-
-    if conn_args.disable_hystart {
-        config.enable_hystart(false);
-    }
-
-    if conn_args.dgrams_enabled {
-        config.enable_dgram(true, 1000, 1000);
-    }
 
     let rng: SystemRandom = SystemRandom::new();
     let conn_id_seed: ring::hmac::Key =
@@ -132,7 +106,7 @@ fn main() {
     let mut clients_ids: HashMap<ConnectionId<'static>, u64> = ClientIdMap::new();
     let mut clients: HashMap<u64, Client> = ClientMap::new();
 
-    let mut pkt_count: i32 = 0;
+    // let mut pkt_count: i32 = 0;
 
     let mut continue_write: bool = false;
 
@@ -190,17 +164,6 @@ fn main() {
             trace!("got {len} bytes from {from} to {local_addr}");
 
             let pkt_buf = &mut buf[..len];
-
-            if let Some(target_path) = conn_args.dump_packet_path.as_ref() {
-                let path = format!("{target_path}/{pkt_count}.pkt");
-
-                if let Ok(f) = std::fs::File::create(path) {
-                    let mut f = std::io::BufWriter::new(f);
-                    f.write_all(pkt_buf).ok();
-                }
-            }
-
-            pkt_count += 1;
 
             // Parse the QUIC packet's header.
             let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
@@ -381,21 +344,13 @@ fn main() {
 
                     client.app_proto_selected = true;
                 } else if alpns::HTTP_3.contains(&app_proto) {
-                    let dgram_sender = if conn_args.dgrams_enabled {
-                        Some(Http3DgramSender::new(
-                            conn_args.dgram_count,
-                            conn_args.dgram_data.clone(),
-                            1,
-                        ))
-                    } else {
-                        None
-                    };
+                    let dgram_sender: Option<Http3DgramSender> = None;
 
                     client.http_conn = match Http3Conn::with_conn(
                         &mut client.conn,
-                        conn_args.max_field_section_size,
-                        conn_args.qpack_max_table_capacity,
-                        conn_args.qpack_blocked_streams,
+                        None,
+                        None,
+                        None,
                         dgram_sender,
                         Rc::new(RefCell::new(stdout_sink)),
                     ) {
@@ -628,267 +583,6 @@ fn handle_path_events(client: &mut Client) {
         }
     }
 }
-
-/// Contains commons arguments for creating a quiche QUIC connection.
-pub struct CommonArgs {
-    pub alpns: Vec<&'static [u8]>,
-    pub max_data: u64,
-    pub max_window: u64,
-    pub max_stream_data: u64,
-    pub max_stream_window: u64,
-    pub max_streams_bidi: u64,
-    pub max_streams_uni: u64,
-    pub idle_timeout: u64,
-    pub early_data: bool,
-    pub dump_packet_path: Option<String>,
-    pub no_grease: bool,
-    pub cc_algorithm: String,
-    pub disable_hystart: bool,
-    pub dgrams_enabled: bool,
-    pub dgram_count: u64,
-    pub dgram_data: String,
-    pub max_active_cids: u64,
-    pub enable_active_migration: bool,
-    pub max_field_section_size: Option<u64>,
-    pub qpack_max_table_capacity: Option<u64>,
-    pub qpack_blocked_streams: Option<u64>,
-    pub initial_rtt: Duration,
-    pub initial_cwnd_packets: u64,
-}
-
-/// Creates a new `CommonArgs` structure using the provided [`Docopt`].
-///
-/// The `Docopt` usage String needs to include the following:
-///
-/// --http-version VERSION      HTTP version to use.
-/// --max-data BYTES            Connection-wide flow control limit.
-/// --max-window BYTES          Connection-wide max receiver window.
-/// --max-stream-data BYTES     Per-stream flow control limit.
-/// --max-stream-window BYTES   Per-stream max receiver window.
-/// --max-streams-bidi STREAMS  Number of allowed concurrent streams.
-/// --max-streams-uni STREAMS   Number of allowed concurrent streams.
-/// --dump-packets PATH         Dump the incoming packets in PATH.
-/// --no-grease                 Don't send GREASE.
-/// --cc-algorithm NAME         Set a congestion control algorithm.
-/// --disable-hystart           Disable HyStart++.
-/// --dgram-proto PROTO         DATAGRAM application protocol.
-/// --dgram-count COUNT         Number of DATAGRAMs to send.
-/// --dgram-data DATA           DATAGRAM data to send.
-/// --max-active-cids NUM       Maximum number of active Connection IDs.
-/// --enable-active-migration   Enable active connection migration.
-/// --max-field-section-size BYTES  Max size of uncompressed field section.
-/// --qpack-max-table-capacity BYTES  Max capacity of dynamic QPACK decoding.
-/// --qpack-blocked-streams STREAMS  Limit of blocked streams while decoding.
-/// --initial-cwnd-packets      Size of initial congestion window, in packets.
-///
-/// [`Docopt`]: https://docs.rs/docopt/1.1.0/docopt/
-impl CommonArgs {
-    fn with_docopt(docopt: &docopt::Docopt) -> Self {
-        let args = docopt.parse().unwrap_or_else(|e| e.exit());
-
-        let http_version = args.get_str("--http-version");
-        let dgram_proto = args.get_str("--dgram-proto");
-        let (alpns, dgrams_enabled) = match (http_version, dgram_proto) {
-            ("HTTP/0.9", "none") => (alpns::HTTP_09.to_vec(), false),
-
-            ("HTTP/0.9", _) => {
-                panic!("Unsupported HTTP version and DATAGRAM protocol.")
-            }
-
-            ("HTTP/3", "none") => (alpns::HTTP_3.to_vec(), false),
-
-            ("HTTP/3", "oneway") => (alpns::HTTP_3.to_vec(), true),
-
-            ("all", "none") => (
-                [alpns::HTTP_3.as_slice(), &alpns::HTTP_09]
-                    .concat()
-                    .to_vec(),
-                false,
-            ),
-
-            (..) => panic!("Unsupported HTTP version and DATAGRAM protocol."),
-        };
-
-        let dgram_count = args.get_str("--dgram-count");
-        let dgram_count = dgram_count.parse::<u64>().unwrap();
-
-        let dgram_data = args.get_str("--dgram-data").to_string();
-
-        let max_data = args.get_str("--max-data");
-        let max_data = max_data.parse::<u64>().unwrap();
-
-        let max_window = args.get_str("--max-window");
-        let max_window = max_window.parse::<u64>().unwrap();
-
-        let max_stream_data = args.get_str("--max-stream-data");
-        let max_stream_data = max_stream_data.parse::<u64>().unwrap();
-
-        let max_stream_window = args.get_str("--max-stream-window");
-        let max_stream_window = max_stream_window.parse::<u64>().unwrap();
-
-        let max_streams_bidi = args.get_str("--max-streams-bidi");
-        let max_streams_bidi = max_streams_bidi.parse::<u64>().unwrap();
-
-        let max_streams_uni = args.get_str("--max-streams-uni");
-        let max_streams_uni = max_streams_uni.parse::<u64>().unwrap();
-
-        let idle_timeout = args.get_str("--idle-timeout");
-        let idle_timeout = idle_timeout.parse::<u64>().unwrap();
-
-        let early_data = args.get_bool("--early-data");
-
-        let dump_packet_path = if !args.get_str("--dump-packets").is_empty() {
-            Some(args.get_str("--dump-packets").to_string())
-        } else {
-            None
-        };
-
-        let no_grease = args.get_bool("--no-grease");
-
-        let cc_algorithm = args.get_str("--cc-algorithm");
-
-        let disable_hystart = args.get_bool("--disable-hystart");
-
-        let max_active_cids = args.get_str("--max-active-cids");
-        let max_active_cids = max_active_cids.parse::<u64>().unwrap();
-
-        let enable_active_migration = args.get_bool("--enable-active-migration");
-
-        let max_field_section_size = if !args.get_str("--max-field-section-size").is_empty() {
-            Some(
-                args.get_str("--max-field-section-size")
-                    .parse::<u64>()
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
-
-        let qpack_max_table_capacity = if !args.get_str("--qpack-max-table-capacity").is_empty() {
-            Some(
-                args.get_str("--qpack-max-table-capacity")
-                    .parse::<u64>()
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
-
-        let qpack_blocked_streams = if !args.get_str("--qpack-blocked-streams").is_empty() {
-            Some(
-                args.get_str("--qpack-blocked-streams")
-                    .parse::<u64>()
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
-
-        let initial_rtt_millis = args.get_str("--initial-rtt").parse::<u64>().unwrap();
-        let initial_rtt = Duration::from_millis(initial_rtt_millis);
-
-        let initial_cwnd_packets = args
-            .get_str("--initial-cwnd-packets")
-            .parse::<u64>()
-            .unwrap();
-
-        CommonArgs {
-            alpns,
-            max_data,
-            max_window,
-            max_stream_data,
-            max_stream_window,
-            max_streams_bidi,
-            max_streams_uni,
-            idle_timeout,
-            early_data,
-            dump_packet_path,
-            no_grease,
-            cc_algorithm: cc_algorithm.to_string(),
-            disable_hystart,
-            dgrams_enabled,
-            dgram_count,
-            dgram_data,
-            max_active_cids,
-            enable_active_migration,
-            max_field_section_size,
-            qpack_max_table_capacity,
-            qpack_blocked_streams,
-            initial_rtt,
-            initial_cwnd_packets,
-        }
-    }
-}
-
-impl Default for CommonArgs {
-    fn default() -> Self {
-        CommonArgs {
-            alpns: alpns::HTTP_3.to_vec(),
-            max_data: 10000000,
-            max_window: 25165824,
-            max_stream_data: 1000000,
-            max_stream_window: 16777216,
-            max_streams_bidi: 100,
-            max_streams_uni: 100,
-            idle_timeout: 30000,
-            early_data: false,
-            dump_packet_path: None,
-            no_grease: false,
-            cc_algorithm: "cubic".to_string(),
-            disable_hystart: false,
-            dgrams_enabled: false,
-            dgram_count: 0,
-            dgram_data: "quack".to_string(),
-            max_active_cids: 2,
-            enable_active_migration: false,
-            max_field_section_size: None,
-            qpack_max_table_capacity: None,
-            qpack_blocked_streams: None,
-            initial_rtt: Duration::from_millis(333),
-            initial_cwnd_packets: 10,
-        }
-    }
-}
-
-/// Application-specific arguments that compliment the `CommonArgs`.
-
-pub const SERVER_USAGE: &str = "Usage:
-  quiche-server [options]
-  quiche-server -h | --help
-
-Options:
-  --listen <addr>             Listen on the given IP:port [default: 127.0.0.1:4433]
-  --cert <file>               TLS certificate path [default: cert/cert.crt]
-  --key <file>                TLS certificate key path [default: cert/cert.key]
-  --root <dir>                Root directory [default: webroot/]
-  --index <name>              The file that will be used as index [default: index.html].
-  --name <str>                Name of the server [default: quic.tech]
-  --max-data BYTES            Connection-wide flow control limit [default: 10000000].
-  --max-window BYTES          Connection-wide max receiver window [default: 25165824].
-  --max-stream-data BYTES     Per-stream flow control limit [default: 1000000].
-  --max-stream-window BYTES   Per-stream max receiver window [default: 16777216].
-  --max-streams-bidi STREAMS  Number of allowed concurrent streams [default: 100].
-  --max-streams-uni STREAMS   Number of allowed concurrent streams [default: 100].
-  --idle-timeout TIMEOUT      Idle timeout in milliseconds [default: 30000].
-  --dump-packets PATH         Dump the incoming packets as files in the given directory.
-  --early-data                Enable receiving early data.
-  --no-retry                  Disable stateless retry.
-  --no-grease                 Don't send GREASE.
-  --http-version VERSION      HTTP version to use [default: all].
-  --dgram-proto PROTO         DATAGRAM application protocol to use [default: none].
-  --dgram-count COUNT         Number of DATAGRAMs to send [default: 0].
-  --dgram-data DATA           Data to send for certain types of DATAGRAM application protocol [default: brrr].
-  --cc-algorithm NAME         Specify which congestion control algorithm to use [default: cubic].
-  --disable-hystart           Disable HyStart++.
-  --max-active-cids NUM       The maximum number of active Connection IDs we can support [default: 2].
-  --enable-active-migration   Enable active connection migration.
-  --max-field-section-size BYTES    Max size of uncompressed HTTP/3 field section. Default is unlimited.
-  --qpack-max-table-capacity BYTES  Max capacity of QPACK dynamic table decoding. Any value other that 0 is currently unsupported.
-  --qpack-blocked-streams STREAMS   Limit of streams that can be blocked while decoding. Any value other that 0 is currently unsupported.
-  --initial-rtt MILLIS     The initial RTT in milliseconds [default: 333].
-  --initial-cwnd-packets PACKETS      The initial congestion window size in terms of packet count [default: 10].
-  -h --help                   Show this screen.
-";
 
 const H3_MESSAGE_ERROR: u64 = 0x10E;
 
