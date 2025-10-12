@@ -48,6 +48,9 @@ use constants::{H3_MESSAGE_ERROR, MAX_BUF_SIZE, MAX_DATAGRAM_SIZE};
 mod autoindex;
 use autoindex::autoindex;
 
+mod http3_dgram_sender;
+use http3_dgram_sender::Http3DgramSender;
+
 fn main() {
     let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
     let mut out: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
@@ -741,7 +744,6 @@ impl Default for Http09Conn {
     }
 }
 
-impl Http09Conn {}
 
 impl HttpConn for Http09Conn {
     fn send_requests(&mut self, conn: &mut quiche::Connection, target_path: &Option<String>) {
@@ -1000,24 +1002,6 @@ impl HttpConn for Http09Conn {
 
         if resp.written == resp.body.len() {
             partial_responses.remove(&stream_id);
-        }
-    }
-}
-
-pub struct Http3DgramSender {
-    dgram_count: u64,
-    pub dgram_content: String,
-    pub flow_id: u64,
-    pub dgrams_sent: u64,
-}
-
-impl Http3DgramSender {
-    pub fn new(dgram_count: u64, dgram_content: String, flow_id: u64) -> Self {
-        Self {
-            dgram_count,
-            dgram_content,
-            flow_id,
-            dgrams_sent: 0,
         }
     }
 }
