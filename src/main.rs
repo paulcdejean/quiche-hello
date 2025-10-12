@@ -9,13 +9,14 @@ use ring::rand::*;
 mod autoindex;
 mod client;
 mod constants;
+mod example_config;
 mod generate_cid_and_reset_token;
 mod handle_path_events;
 mod hdrs_to_strings;
-mod http_conn;
 mod http09;
-mod http3_dgram_sender;
 mod http3;
+mod http3_dgram_sender;
+mod http_conn;
 mod make_h3_config;
 mod make_resource_writer;
 mod mint_token;
@@ -25,21 +26,20 @@ mod priority_field_value_from_query_string;
 mod send_h3_dgram;
 mod validate_token;
 mod writable_response_streams;
-mod example_config;
 
 use client::{Client, ClientIdMap, ClientMap};
 use constants::{MAX_BUF_SIZE, MAX_DATAGRAM_SIZE};
+use example_config::example_config;
 use generate_cid_and_reset_token::generate_cid_and_reset_token;
 use handle_path_events::handle_path_events;
 use http_conn::HttpConn;
-use http09::Http09Conn;
-use http3_dgram_sender::Http3DgramSender;
 use http3::Http3Conn;
+use http3_dgram_sender::Http3DgramSender;
+use http09::Http09Conn;
 use mint_token::mint_token;
 use partial_response::PartialResponse;
 use validate_token::validate_token;
 use writable_response_streams::writable_response_streams;
-use example_config::example_config;
 
 fn main() {
     let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
@@ -67,7 +67,6 @@ fn main() {
     // let mut config: quiche::Config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     let mut config: quiche::Config = example_config();
 
-    let mut keylog: Option<std::fs::File> = None;
     let rng: SystemRandom = SystemRandom::new();
     let conn_id_seed: ring::hmac::Key =
         ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
@@ -235,12 +234,6 @@ fn main() {
                 #[allow(unused_mut)]
                 let mut conn =
                     quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut config).unwrap();
-
-                if let Some(keylog) = &mut keylog {
-                    if let Ok(keylog) = keylog.try_clone() {
-                        conn.set_keylog(Box::new(keylog));
-                    }
-                }
 
                 let client_id = next_client_id;
 

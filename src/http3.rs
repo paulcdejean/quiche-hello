@@ -26,8 +26,6 @@ pub struct Http3Conn {
 }
 
 impl Http3Conn {
-    #[allow(clippy::too_many_arguments)]
-
     pub fn with_conn(
         conn: &mut quiche::Connection,
         max_field_section_size: Option<u64>,

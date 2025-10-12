@@ -14,9 +14,7 @@ pub fn example_config() -> quiche::Config {
         .load_cert_chain_from_pem_file("cert/cert.crt")
         .unwrap();
     config.load_priv_key_from_pem_file("cert/cert.key").unwrap();
-    config
-        .set_application_protos(&alpns::HTTP_3.to_vec())
-        .unwrap();
+    config.set_application_protos(&alpns::HTTP_3).unwrap();
     config.discover_pmtu(false);
     config.set_initial_rtt(std::time::Duration::from_millis(333));
     config.set_max_idle_timeout(30000);
