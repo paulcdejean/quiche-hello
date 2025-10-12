@@ -1,76 +1,51 @@
-use log::{debug, error, info, trace, warn};
-use ring::rand::*;
-use std::cell::RefCell;
-use std::collections::HashMap;
-
-use std::net;
-use std::rc::Rc;
-use std::time::Duration;
-
-use quiche::ConnectionId;
 use std::cmp;
+use std::collections::HashMap;
+use std::net;
 
-mod mint_token;
-use mint_token::mint_token;
-
-mod validate_token;
-use validate_token::validate_token;
-
-mod stdout_sink;
-use stdout_sink::stdout_sink;
-
-mod http_conn;
-use http_conn::HttpConn;
-
-mod partial_request;
-
-mod partial_response;
-use partial_response::PartialResponse;
-
-mod make_resource_writer;
-
-mod client;
-use client::{Client, ClientIdMap, ClientMap};
-
-mod handle_path_events;
-use handle_path_events::handle_path_events;
-
-mod constants;
-use constants::{MAX_BUF_SIZE, MAX_DATAGRAM_SIZE};
+use log::{debug, error, info, trace, warn};
+use quiche::ConnectionId;
+use ring::rand::*;
 
 mod autoindex;
-
-mod http3_dgram_sender;
-use http3_dgram_sender::Http3DgramSender;
-
-mod hdrs_to_strings;
-
+mod client;
+mod constants;
 mod generate_cid_and_reset_token;
-use generate_cid_and_reset_token::generate_cid_and_reset_token;
-
-mod priority_field_value_from_query_string;
-
-mod send_h3_dgram;
-
+mod handle_path_events;
+mod hdrs_to_strings;
+mod http_conn;
 mod http09;
-use http09::Http09Conn;
-
-mod make_h3_config;
-
-mod writable_response_streams;
-use writable_response_streams::writable_response_streams;
-
+mod http3_dgram_sender;
 mod http3;
+mod make_h3_config;
+mod make_resource_writer;
+mod mint_token;
+mod partial_request;
+mod partial_response;
+mod priority_field_value_from_query_string;
+mod send_h3_dgram;
+mod validate_token;
+mod writable_response_streams;
+mod example_config;
+
+use client::{Client, ClientIdMap, ClientMap};
+use constants::{MAX_BUF_SIZE, MAX_DATAGRAM_SIZE};
+use generate_cid_and_reset_token::generate_cid_and_reset_token;
+use handle_path_events::handle_path_events;
+use http_conn::HttpConn;
+use http09::Http09Conn;
+use http3_dgram_sender::Http3DgramSender;
 use http3::Http3Conn;
+use mint_token::mint_token;
+use partial_response::PartialResponse;
+use validate_token::validate_token;
+use writable_response_streams::writable_response_streams;
+use example_config::example_config;
 
 fn main() {
     let mut buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
     let mut out: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
-    let pacing: bool = false;
 
     env_logger::builder().format_timestamp_nanos().init();
-
-    // Parse CLI parameters.
 
     // Setup the event loop.
     let mut poll: mio::Poll = mio::Poll::new().unwrap();
@@ -89,32 +64,8 @@ fn main() {
     let max_datagram_size = MAX_DATAGRAM_SIZE;
 
     // Create the configuration for the QUIC connections.
-    let mut config: quiche::Config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-
-    config
-        .load_cert_chain_from_pem_file("cert/cert.crt")
-        .unwrap();
-    config.load_priv_key_from_pem_file("cert/cert.key").unwrap();
-    config
-        .set_application_protos(&alpns::HTTP_3.to_vec())
-        .unwrap();
-    config.discover_pmtu(false);
-    config.set_initial_rtt(Duration::from_millis(333));
-    config.set_max_idle_timeout(30000);
-    config.set_max_recv_udp_payload_size(max_datagram_size);
-    config.set_max_send_udp_payload_size(max_datagram_size);
-    config.set_initial_max_data(10000000);
-    config.set_initial_max_stream_data_bidi_local(1000000);
-    config.set_initial_max_stream_data_bidi_remote(1000000);
-    config.set_initial_max_stream_data_uni(1000000);
-    config.set_initial_max_streams_bidi(100);
-    config.set_initial_max_streams_uni(100);
-    config.set_disable_active_migration(true);
-    config.set_active_connection_id_limit(2);
-    config.set_initial_congestion_window_packets(10);
-    config.set_max_connection_window(25165824);
-    config.set_max_stream_window(16777216);
-    config.enable_pacing(pacing);
+    // let mut config: quiche::Config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    let mut config: quiche::Config = example_config();
 
     let mut keylog: Option<std::fs::File> = None;
     let rng: SystemRandom = SystemRandom::new();
@@ -366,7 +317,6 @@ fn main() {
                         None,
                         None,
                         dgram_sender,
-                        Rc::new(RefCell::new(stdout_sink)),
                     ) {
                         Ok(v) => Some(v),
 

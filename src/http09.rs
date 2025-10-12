@@ -1,32 +1,14 @@
 use log::{debug, error, info, trace};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path;
-use std::rc::Rc;
 
 use crate::partial_request::PartialRequest;
 use crate::partial_response::PartialResponse;
 
 use crate::HttpConn;
 use crate::autoindex::autoindex;
-use crate::stdout_sink::stdout_sink;
 
-/// Represents an HTTP/0.9 formatted request.
-pub struct Http09Request {
-    url: url::Url,
-    cardinal: u64,
-    request_line: String,
-    stream_id: Option<u64>,
-    response_writer: Option<std::io::BufWriter<std::fs::File>>,
-}
-
-pub struct Http09Conn {
-    stream_id: u64,
-    reqs_sent: usize,
-    reqs_complete: usize,
-    reqs: Vec<Http09Request>,
-    output_sink: Rc<RefCell<dyn FnMut(String)>>,
-}
+pub struct Http09Conn;
 
 impl HttpConn for Http09Conn {
     fn handle_requests(
@@ -179,12 +161,6 @@ impl HttpConn for Http09Conn {
 
 impl Default for Http09Conn {
     fn default() -> Self {
-        Http09Conn {
-            stream_id: Default::default(),
-            reqs_sent: Default::default(),
-            reqs_complete: Default::default(),
-            reqs: Default::default(),
-            output_sink: Rc::new(RefCell::new(stdout_sink)),
-        }
+        Http09Conn
     }
 }

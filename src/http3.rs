@@ -1,11 +1,7 @@
 use log::{debug, error, info, trace};
-use std::cell::RefCell;
 use std::collections::HashMap;
 
-use std::rc::Rc;
-
 use quiche::h3::NameValue;
-use quiche::h3::Priority;
 use std::path;
 
 use crate::autoindex::autoindex;
@@ -20,32 +16,13 @@ use crate::priority_field_value_from_query_string::priority_field_value_from_que
 use crate::send_h3_dgram::send_h3_dgram;
 use crate::writable_response_streams::writable_response_streams;
 
-/// Represents an HTTP/3 formatted request.
-struct Http3Request {
-    url: url::Url,
-    cardinal: u64,
-    stream_id: Option<u64>,
-    hdrs: Vec<quiche::h3::Header>,
-    priority: Option<Priority>,
-    response_hdrs: Vec<quiche::h3::Header>,
-    response_body: Vec<u8>,
-    response_body_max: usize,
-    response_writer: Option<std::io::BufWriter<std::fs::File>>,
-}
-
 type Http3ResponseBuilderResult =
     std::result::Result<(Vec<quiche::h3::Header>, Vec<u8>, Vec<u8>), (u64, String)>;
 
 pub struct Http3Conn {
     h3_conn: quiche::h3::Connection,
-    reqs_hdrs_sent: usize,
-    reqs_complete: usize,
     largest_processed_request: u64,
-    reqs: Vec<Http3Request>,
-    body: Option<Vec<u8>>,
-    sent_body_bytes: HashMap<u64, usize>,
     dgram_sender: Option<Http3DgramSender>,
-    output_sink: Rc<RefCell<dyn FnMut(String)>>,
 }
 
 impl Http3Conn {
@@ -57,8 +34,7 @@ impl Http3Conn {
         qpack_max_table_capacity: Option<u64>,
         qpack_blocked_streams: Option<u64>,
         dgram_sender: Option<Http3DgramSender>,
-        output_sink: Rc<RefCell<dyn FnMut(String)>>,
-    ) -> std::result::Result<Box<dyn HttpConn>, String> {
+    ) -> Result<Box<Self>, String> {
         let h3_conn = quiche::h3::Connection::with_transport(
             conn,
             &make_h3_config(
@@ -70,14 +46,8 @@ impl Http3Conn {
 
         let h_conn = Http3Conn {
             h3_conn,
-            reqs_hdrs_sent: 0,
-            reqs_complete: 0,
             largest_processed_request: 0,
-            reqs: Vec::new(),
-            body: None,
-            sent_body_bytes: HashMap::new(),
             dgram_sender,
-            output_sink,
         };
 
         Ok(Box::new(h_conn))
