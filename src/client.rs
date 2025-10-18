@@ -20,8 +20,6 @@ pub struct Client {
     pub partial_responses: std::collections::HashMap<u64, PartialResponse>,
 
     pub max_datagram_size: usize,
-
-    pub max_send_burst: usize,
 }
 
 pub type ClientIdMap = HashMap<ConnectionId<'static>, ClientId>;

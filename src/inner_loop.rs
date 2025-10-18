@@ -35,8 +35,6 @@ pub mod alpns {
 /// Read incoming UDP packets from the socket and feed them to quiche,
 /// until there are no more packets to read.
 pub fn inner_loop(
-    events: &mut mio::Events,
-    continue_write: bool,
     clients: &mut HashMap<u64, Client>,
     socket: &mut mio::net::UdpSocket,
     mut buf: [u8; MAX_BUF_SIZE],
@@ -49,17 +47,6 @@ pub fn inner_loop(
     rng: &SystemRandom,
 ) {
     loop {
-        // If the event loop reported no events, it means that the timeout
-        // has expired, so handle it without attempting to read packets. We
-        // will then proceed with the send loop.
-        if events.is_empty() && !continue_write {
-            trace!("timed out");
-
-            clients.values_mut().for_each(|c| c.conn.on_timeout());
-
-            break;
-        }
-
         let (len, from) = match socket.recv_from(&mut buf) {
             Ok(v) => v,
 
@@ -89,7 +76,7 @@ pub fn inner_loop(
             }
         };
 
-        trace!("got packet {hdr:?}");
+        error!("got packet {hdr:?}");
 
         let conn_id = ring::hmac::sign(conn_id_seed, &hdr.dcid);
         let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
@@ -193,7 +180,6 @@ pub fn inner_loop(
                 partial_responses: HashMap::new(),
                 app_proto_selected: false,
                 max_datagram_size: MAX_DATAGRAM_SIZE,
-                max_send_burst: MAX_BUF_SIZE,
             };
 
             clients.insert(client_id, client);

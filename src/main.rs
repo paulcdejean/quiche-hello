@@ -37,7 +37,7 @@ use inner_loop::inner_loop;
 
 fn main() {
     let buf: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
-    let mut out: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
+    let out: [u8; MAX_BUF_SIZE] = [0; MAX_BUF_SIZE];
     env_logger::builder().format_timestamp_nanos().init();
 
     // Setup the event loop.
@@ -63,8 +63,8 @@ fn main() {
     let mut next_client_id: u64 = 0;
     let mut clients_ids: HashMap<ConnectionId<'static>, u64> = ClientIdMap::new();
     let mut clients: HashMap<u64, Client> = ClientMap::new();
-    let mut continue_write: bool = false;
     let local_addr: net::SocketAddr = socket.local_addr().unwrap();
+    let mut continue_write: bool = false;
 
     loop {
         while let Err(e) = poll.poll(&mut events, None) {
@@ -76,31 +76,35 @@ fn main() {
 
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
-        inner_loop(
-            &mut events,
-            continue_write,
-            &mut clients,
-            &mut socket,
-            buf,
-            local_addr,
-            &conn_id_seed,
-            &mut clients_ids,
-            out,
-            &mut config,
-            &mut next_client_id,
-            &rng,
-        );
+        if !events.is_empty() && !continue_write {
+            inner_loop(
+                &mut clients,
+                &mut socket,
+                buf,
+                local_addr,
+                &conn_id_seed,
+                &mut clients_ids,
+                out,
+                &mut config,
+                &mut next_client_id,
+                &rng,
+            );
+        } else {
+            clients.values_mut().for_each(|c| c.conn.on_timeout());
+        }
 
         // Generate outgoing QUIC packets for all active connections and send
         // them on the UDP socket, until quiche reports that there are no more
         // packets to be sent.
         continue_write = false;
         for client in clients.values_mut() {
-            let max_send_burst = client.conn.send_quantum().min(client.max_send_burst)
+            let max_send_burst = client.conn.send_quantum()
                 / client.max_datagram_size
                 * client.max_datagram_size;
             let mut total_write = 0;
             let mut dst_info = None;
+
+            let mut out: [u8; 65507] = [0; MAX_BUF_SIZE];
 
             while total_write < max_send_burst {
                 let (write, send_info) =
@@ -162,9 +166,7 @@ fn main() {
         }
 
         // Garbage collect closed connections.
-        clients.retain(|_, ref mut c| {
-            log::trace!("Collecting garbage");
-
+        clients.retain(|_, c| {
             if c.conn.is_closed() {
                 log::info!(
                     "{} connection collected {:?} {:?}",
@@ -174,8 +176,7 @@ fn main() {
                 );
 
                 for id in c.conn.source_ids() {
-                    let id_owned = id.clone().into_owned();
-                    clients_ids.remove(&id_owned);
+                    clients_ids.remove(&id.clone().into_owned());
                 }
             }
 
