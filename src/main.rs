@@ -67,22 +67,10 @@ fn main() {
     let local_addr: net::SocketAddr = socket.local_addr().unwrap();
 
     loop {
-        // Find the shorter timeout from all the active connections.
-        //
-        // TODO: use event loop that properly supports timers
-        let timeout = match continue_write {
-            true => Some(std::time::Duration::from_secs(0)),
-
-            false => clients.values().filter_map(|c| c.conn.timeout()).min(),
-        };
-
-        let mut poll_res: Result<(), std::io::Error> = poll.poll(&mut events, timeout);
-        while let Err(e) = poll_res.as_ref() {
-            if e.kind() == std::io::ErrorKind::Interrupted {
-                log::trace!("mio poll() call failed, retrying: {e:?}");
-                poll_res = poll.poll(&mut events, timeout);
-            } else {
-                panic!("mio poll() call failed fatally: {e:?}");
+        while let Err(e) = poll.poll(&mut events, None) {
+            match e.kind() {
+                std::io::ErrorKind::Interrupted => log::trace!("mio poll() call failed, retrying: {e:?}"),
+                _ => panic!("mio poll() call failed fatally: {e:?}"),
             }
         }
 
