@@ -193,7 +193,6 @@ pub fn inner_loop(
                 partial_responses: HashMap::new(),
                 app_proto_selected: false,
                 max_datagram_size: MAX_DATAGRAM_SIZE,
-                loss_rate: 0.0,
                 max_send_burst: MAX_BUF_SIZE,
             };
 

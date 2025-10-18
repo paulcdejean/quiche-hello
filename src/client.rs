@@ -21,8 +21,6 @@ pub struct Client {
 
     pub max_datagram_size: usize,
 
-    pub loss_rate: f64,
-
     pub max_send_burst: usize,
 }
 

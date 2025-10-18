@@ -96,15 +96,6 @@ fn main() {
         // packets to be sent.
         continue_write = false;
         for client in clients.values_mut() {
-            // Reduce max_send_burst by 25% if loss is increasing more than 0.1%.
-            let loss_rate = client.conn.stats().lost as f64 / client.conn.stats().sent as f64;
-            if loss_rate > client.loss_rate + 0.001 {
-                client.max_send_burst = client.max_send_burst / 4 * 3;
-                // Minimum bound of 10xMSS.
-                client.max_send_burst = client.max_send_burst.max(client.max_datagram_size * 10);
-                client.loss_rate = loss_rate;
-            }
-
             let max_send_burst = client.conn.send_quantum().min(client.max_send_burst)
                 / client.max_datagram_size
                 * client.max_datagram_size;
